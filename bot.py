@@ -267,4 +267,17 @@ async def handle_game_messages(message: types.Message):
         partner_id = user_states[user_id].get("partner_id")
         if partner_id:
             user_states[partner_id]["partner_id"] = None
-       
+        user_states[user_id]["partner_id"] = None
+        user_states[user_id]["current_task"] = None
+        user_states[user_id]["current_level"] = None
+        user_states[user_id]["task_assigned_time"] = None
+        user_states[user_id]["used"].clear()
+        user_states[user_id]["skips"] = 0
+        user_states[user_id]["score"] = 0
+        await message.answer("Гру завершено. Щоб почати знову — введи /start")
+        return
+
+    await message.answer("Натисни кнопку на клавіатурі або введи /start для початку.")
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
