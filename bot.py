@@ -93,7 +93,7 @@ async def send_task(message: types.Message):
     deadline = datetime.now() + duration
 
     user['current_task'] = {'text': task['text'], 'deadline': deadline}
-    
+
     partner_id = user['partner']
     partner = users[partner_id]
     partner_name = partner['name']
@@ -105,7 +105,7 @@ async def send_task(message: types.Message):
     )
 
     try:
-        await bot.send_message(partner_id, f"{user['name']} отримав нове завдання.")
+        await bot.send_message(partner_id, f"{user['name']} отримав нове завдання: {task['text']}")
     except Exception:
         pass
 
@@ -121,6 +121,7 @@ async def accept_task(message: types.Message):
     user['accepted_tasks'].append(user['current_task'])
     user['current_task'] = None
     user['skips'] = 0
+    user['score'] += 1
 
     await message.answer(f"✅ Завдання прийнято: {task_text}")
 
@@ -145,7 +146,6 @@ async def skip_task(message: types.Message):
         user['score'] -= 1
         user['skips'] = 0
         await message.answer("❌ 3 пропуски підряд. -1 бал.")
-
     else:
         await message.answer(f"Пропущено завдання: {text}")
 
