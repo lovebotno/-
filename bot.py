@@ -7,7 +7,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 from tasks import tasks  # Твоя структура завдань з рівнями
 
-API_TOKEN = '7470253170:AAHX7NqY3L3H4pdCXVeDPsMXPvz8DM0_L70'  # 🔁 Замінити на свій токен
+API_TOKEN = '7808304545:AAEagMXlNfvHd3zG-w21uJHKcEznjaaIJRM'  # 🔁 Замінити на свій токен
 
 logging.basicConfig(level=logging.INFO)
 
