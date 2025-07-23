@@ -1,18 +1,23 @@
 import logging
 import random
-from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from tasks import tasks  # файл з завданнями
 
-API_TOKEN = '7470253170:AAHX7NqY3L3H4pdCXVeDPsMXPvz8DM0_L70'
+API_TOKEN = '7470253170:AAHX7NqY3L3H4pdCXVeDPsMXPvz8DM0_L70'  # встав свій токен сюди
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Бали за рівень
+# Словник для зберігання станів користувачів
+user_states = {}
+# Словник для ігор (ключ — кортеж з двох user_id)
+game_sessions = {}
+# Користувачі, які зараз вводять ID партнера (очікування)
+awaiting_partner_id = set()
+
+# Бали за рівні складності
 points_map = {
     "easy": 1,
     "medium": 2,
@@ -20,231 +25,200 @@ points_map = {
     "bonus": 5
 }
 
-# Сесії гри: key - chat_id або інша логіка, value - dict з двома гравцями (user_ids)
-game_sessions = {}
-
-# Стани користувачів
-user_states = {}
-# Структура user_states[user_id] = {
-#   'score': int,
-#   'used': set(),
-#   'skips': int,
-#   'current_task': str or None,
-#   'current_level': str or None,
-#   'deadline': datetime or None,
-#   'partner_id': int or None
+# Припустимо, що у вас є файл tasks.py з таким словником:
+# tasks = {
+#   "easy": [...],
+#   "medium": [...],
+#   "hard": [...],
+#   "bonus": [...],
 # }
 
-def get_new_task(user_id):
-    used = user_states[user_id]["used"]
-    level = random.choice(list(tasks.keys()))
-    available = [t for t in tasks[level] if t not in used]
-    if not available:
-        for lvl in tasks.keys():
-            available = [t for t in tasks[lvl] if t not in used]
-            if available:
-                level = lvl
-                break
-    if not available:
-        return None, None
-    task = random.choice(available)
-    user_states[user_id]["used"].add(task)
-    return task, level
+from tasks import tasks  # імпортуй свій файл з завданнями
 
-def get_deadline_by_level(level):
-    if level == "hard":
-        return datetime.now() + timedelta(days=7)
-    else:
-        return datetime.now() + timedelta(days=1)
+# Для перевірки, чи завдання використані в обох
+def used_tasks_for_session(user1, user2):
+    used1 = user_states.get(user1, {}).get("used", set())
+    used2 = user_states.get(user2, {}).get("used", set())
+    return used1.union(used2)
+
+def get_new_task_for_user(user_id):
+    partner_id = user_states[user_id].get("partner_id")
+    if not partner_id:
+        return None, None
+    used = used_tasks_for_session(user_id, partner_id)
+    levels = list(tasks.keys())
+    random.shuffle(levels)
+    for level in levels:
+        available = [t for t in tasks[level] if t not in used]
+        if available:
+            task = random.choice(available)
+            user_states[user_id]["used"].add(task)
+            return task, level
+    return None, None
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    user_states[user_id] = {
-        "score": 0,
-        "used": set(),
-        "skips": 0,
-        "current_task": None,
-        "current_level": None,
-        "deadline": None,
-        "partner_id": None,
-    }
+    if user_id not in user_states:
+        user_states[user_id] = {
+            "score": 0,
+            "used": set(),
+            "skips": 0,
+            "current_task": None,
+            "current_level": None,
+            "partner_id": None
+        }
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("Запросити партнера"))
     kb.add(KeyboardButton("Почати гру з партнером"))
-    kb.add(KeyboardButton("Переглянути моє завдання"))
-    kb.add(KeyboardButton("Переглянути завдання партнера"))
-    kb.add(KeyboardButton("Прийняти завдання"))
-    kb.add(KeyboardButton("Завдання виконано"))
+    kb.add(KeyboardButton("Нове завдання"))
     kb.add(KeyboardButton("Пропустити"))
+    kb.add(KeyboardButton("Виконано"))
     kb.add(KeyboardButton("Мій рахунок"))
     kb.add(KeyboardButton("Рахунок партнера"))
+    kb.add(KeyboardButton("Список виконаних"))
     kb.add(KeyboardButton("Закінчити гру"))
-    await message.answer(
-        "Вітаю! Щоб грати з партнером, натисни 'Почати гру з партнером'. "
-        "Інші кнопки для управління грою.",
-        reply_markup=kb
-    )
+    await message.answer("Вітаю! Реєстрація завершена.\n\n" +
+                         "1) Запроси партнера, щоб грати разом.\n" +
+                         "2) Після того, як партнер прийме запрошення, натисни 'Почати гру з партнером'.\n\n" +
+                         "Використовуй кнопки для гри.", reply_markup=kb)
 
-@dp.message_handler(lambda message: message.text == "Почати гру з партнером")
-async def start_game_with_partner(message: types.Message):
+@dp.message_handler(lambda message: message.text == "Запросити партнера")
+async def request_partner(message: types.Message):
     user_id = message.from_user.id
-    await message.answer("Введи Telegram user ID або username партнера (без @):")
+    awaiting_partner_id.add(user_id)
+    await message.answer("Введи user_id партнера (цифрами). Він має бути зареєстрований у боті.")
 
-    # Чекаємо наступне повідомлення для отримання партнера
-    @dp.message_handler()
-    async def set_partner(msg: types.Message):
-        partner_id = None
-        # Спробуємо витягти айді, якщо це число
-        if msg.text.isdigit():
-            partner_id = int(msg.text)
-        else:
-            # Спробуємо знайти користувача по username, це складніше і вимагає додаткової логіки
-            await msg.answer("Поки введіть user_id цифрами.")
+@dp.message_handler()
+async def receive_partner(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in awaiting_partner_id:
+        partner_text = message.text.strip()
+        if not partner_text.isdigit():
+            await message.answer("Введи тільки числовий user_id партнера.")
             return
-
+        partner_id = int(partner_text)
         if partner_id == user_id:
-            await msg.answer("Ти не можеш грати з самим собою, введи інший user ID.")
+            await message.answer("Ти не можеш запросити самого себе. Введи інший user_id.")
+            return
+        if partner_id not in user_states:
+            await message.answer("Партнер не зареєстрований. Нехай він напише /start.")
             return
 
-        # Ініціалізуємо стан для партнера, якщо немає
-        if partner_id not in user_states:
-            user_states[partner_id] = {
-                "score": 0,
-                "used": set(),
-                "skips": 0,
-                "current_task": None,
-                "current_level": None,
-                "deadline": None,
-                "partner_id": user_id
-            }
-        else:
-            user_states[partner_id]["partner_id"] = user_id
+        # Записуємо заявку
+        if "partner_requests" not in user_states[partner_id]:
+            user_states[partner_id]["partner_requests"] = set()
+        user_states[partner_id]["partner_requests"].add(user_id)
 
-        user_states[user_id]["partner_id"] = partner_id
+        awaiting_partner_id.remove(user_id)
+        await message.answer(f"Запит відправлено користувачу {partner_id}. Очікуй, поки він прийме.")
+        try:
+            await bot.send_message(partner_id, f"Користувач {user_id} запросив тебе в гру. Відповіси 'прийняти {user_id}' або 'відхилити {user_id}'.")
+        except Exception:
+            await message.answer("Не вдалося відправити повідомлення партнеру. Можливо він заблокував бота.")
+        return
 
-        # Створюємо сесію, key - tuple двох user_id (для простоти унікальний ідентифікатор сесії)
-        session_key = tuple(sorted([user_id, partner_id]))
+    # Обробка відповіді партнера
+    text = message.text.lower()
+    if text.startswith("прийняти"):
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await message.answer("Щоб прийняти, введи: 'прийняти <user_id>'")
+            return
+        requester_id = int(parts[1])
+        if requester_id not in user_states or user_id not in user_states[requester_id].get("partner_requests", set()):
+            await message.answer("Немає запиту від цього користувача.")
+            return
+
+        # Встановлюємо партнерство
+        user_states[user_id]["partner_id"] = requester_id
+        user_states[requester_id]["partner_id"] = user_id
+
+        # Очищаємо запити
+        user_states[requester_id]["partner_requests"].remove(user_id)
+
+        # Ініціалізуємо використані завдання для обох, якщо нема
+        user_states[user_id].setdefault("used", set())
+        user_states[requester_id].setdefault("used", set())
+
+        # Ініціалізуємо пропуски
+        user_states[user_id]["skips"] = 0
+        user_states[requester_id]["skips"] = 0
+
+        session_key = tuple(sorted([user_id, requester_id]))
         game_sessions[session_key] = {"players": session_key}
 
-        await msg.answer(f"Гра почалася з користувачем {partner_id}. Тепер натисни 'Нове завдання' для отримання завдання.")
-
-        # Видаляємо цей handler після першого використання, щоб не перехоплював всі наступні повідомлення
-        dp.message_handlers.unregister(set_partner)
-
-@dp.message_handler(lambda message: message.text == "Нове завдання")
-async def new_task_handler(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in user_states or user_states[user_id]["partner_id"] is None:
-        await message.answer("Спочатку почніть гру з партнером командою 'Почати гру з партнером'.")
+        await message.answer(f"Ви успішно стали партнерами з користувачем {requester_id}! Натисніть 'Почати гру з партнером'.")
+        try:
+            await bot.send_message(requester_id, f"Користувач {user_id} прийняв твій запит. Натисни 'Почати гру з партнером'.")
+        except Exception:
+            pass
         return
 
-    task, level = get_new_task(user_id)
-    if task is None:
-        await message.answer("Всі завдання виконані! Вітаємо 🎉")
-        return
-    deadline = get_deadline_by_level(level)
-    user_states[user_id]["current_task"] = task
-    user_states[user_id]["current_level"] = level
-    user_states[user_id]["deadline"] = deadline
-    user_states[user_id]["skips"] = 0
+    if text.startswith("відхилити"):
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await message.answer("Щоб відхилити, введи: 'відхилити <user_id>'")
+            return
+        requester_id = int(parts[1])
+        if requester_id not in user_states or user_id not in user_states[requester_id].get("partner_requests", set()):
+            await message.answer("Немає запиту від цього користувача.")
+            return
 
-    await message.answer(
-        f"Твоє завдання ({level} рівень, {points_map[level]} балів):\n\n{task}\n\n"
-        f"Термін виконання: до {deadline.strftime('%d-%m-%Y %H:%M')}\n"
-        "Щоб прийняти завдання, натисни кнопку 'Прийняти завдання'."
-    )
-
-@dp.message_handler(lambda message: message.text == "Прийняти завдання")
-async def accept_task_handler(message: types.Message):
-    user_id = message.from_user.id
-    if not user_states[user_id].get("current_task"):
-        await message.answer("У тебе немає активного завдання для прийняття. Натисни 'Нове завдання'.")
-        return
-    await message.answer(f"Завдання прийнято:\n{user_states[user_id]['current_task']}")
-
-@dp.message_handler(lambda message: message.text == "Завдання виконано")
-async def task_done_handler(message: types.Message):
-    user_id = message.from_user.id
-    if not user_states[user_id].get("current_task"):
-        await message.answer("У тебе немає активного завдання.")
+        user_states[requester_id]["partner_requests"].remove(user_id)
+        await message.answer(f"Відхилили запит від користувача {requester_id}.")
+        try:
+            await bot.send_message(requester_id, f"Користувач {user_id} відхилив твій запит.")
+        except Exception:
+            pass
         return
 
-    level = user_states[user_id]["current_level"]
-    points = points_map[level]
-    user_states[user_id]["score"] += points
-    user_states[user_id]["current_task"] = None
-    user_states[user_id]["current_level"] = None
-    user_states[user_id]["deadline"] = None
-    user_states[user_id]["skips"] = 0
+    # Далі обробка інших повідомлень
+    await handle_game_messages(message)
 
-    await message.answer(f"Завдання виконано! Ти отримав {points} балів.\nТвій рахунок: {user_states[user_id]['score']}")
-
-@dp.message_handler(lambda message: message.text == "Пропустити")
-async def skip_task_handler(message: types.Message):
+async def handle_game_messages(message: types.Message):
     user_id = message.from_user.id
-    user_states[user_id]["skips"] += 1
-    if user_states[user_id]["skips"] > 2:
-        user_states[user_id]["score"] -= 1
+    if user_id not in user_states:
+        await message.answer("Спочатку введи /start")
+        return
+
+    partner_id = user_states[user_id].get("partner_id")
+    if not partner_id:
+        await message.answer("В тебе немає партнера. Запроси його або прийми запит.")
+        return
+
+    text = message.text.lower()
+
+    if text == "почати гру з партнером":
+        # Просто підтверджуємо що гру почали
+        await message.answer("Гра починається! Тепер ви можете отримувати завдання.")
+        return
+
+    if text == "нове завдання":
+        task, level = get_new_task_for_user(user_id)
+        if task is None:
+            await message.answer("Всі завдання виконані обома гравцями! Вітаємо 🎉")
+            return
+        points = points_map[level]
+        user_states[user_id]["current_task"] = task
+        user_states[user_id]["current_level"] = level
         user_states[user_id]["skips"] = 0
-        await message.answer("Третій пропуск підряд — мінус 1 бал.")
-    else:
-        await message.answer(f"Пропущено завдання без штрафу ({user_states[user_id]['skips']} пропуски).")
-    # Знімаємо активне завдання, бо воно пропущене
-    user_states[user_id]["current_task"] = None
-    user_states[user_id]["current_level"] = None
-    user_states[user_id]["deadline"] = None
-
-@dp.message_handler(lambda message: message.text == "Переглянути моє завдання")
-async def view_my_task(message: types.Message):
-    user_id = message.from_user.id
-    task = user_states[user_id].get("current_task")
-    deadline = user_states[user_id].get("deadline")
-    if task:
-        await message.answer(f"Твоє активне завдання:\n{task}\nТермін виконання до {deadline.strftime('%d-%m-%Y %H:%M')}")
-    else:
-        await message.answer("У тебе немає активного завдання.")
-
-@dp.message_handler(lambda message: message.text == "Переглянути завдання партнера")
-async def view_partner_task(message: types.Message):
-    user_id = message.from_user.id
-    partner_id = user_states[user_id].get("partner_id")
-    if not partner_id or partner_id not in user_states:
-        await message.answer("Партнер не підключений або не знайдений.")
-        return
-    task = user_states[partner_id].get("current_task")
-    if task:
-        await message.answer("Партнер має активне завдання.")
-    else:
-        await message.answer("Партнер не має активного завдання.")
-
-@dp.message_handler(lambda message: message.text == "Мій рахунок")
-async def my_score(message: types.Message):
-    user_id = message.from_user.id
-    score = user_states[user_id]["score"]
-    await message.answer(f"Твій рахунок: {score} балів")
-
-@dp.message_handler(lambda message: message.text == "Рахунок партнера")
-async def partner_score(message: types.Message):
-    user_id = message.from_user.id
-    partner_id = user_states[user_id].get("partner_id")
-    if not partner_id or partner_id not in user_states:
-        await message.answer("Партнер не підключений або не знайдений.")
-        return
-    score = user_states[partner_id]["score"]
-    await message.answer(f"Рахунок партнера: {score} балів")
-
-@dp.message_handler(lambda message: message.text == "Закінчити гру")
-async def end_game(message: types.Message):
-    user_id = message.from_user.id
-    partner_id = user_states[user_id].get("partner_id")
-
-    if partner_id and partner_id in user_states:
-        user_states[partner_id]["partner_id"] = None
-
-    if user_id in user_states:
-        del user_states[user_id]
-
-    await message.answer("Гру завершено. Щоб почати знову — введи /start.")
-
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+        await message.answer(f"Твоє завдання ({level} рівень, {points} балів):\n\n{task}")
+    elif text == "пропустити":
+        user_states[user_id]["skips"] += 1
+        if user_states[user_id]["skips"] > 2:
+            user_states[user_id]["score"] -= 1
+            user_states[user_id]["skips"] = 0
+            await message.answer("Третій пропуск підряд — мінус 1 бал.")
+        else:
+            await message.answer(f"Пропущено завдання без штрафу ({user_states[user_id]['skips']} пропуски).")
+    elif text == "виконано":
+        if "current_task" not in user_states[user_id] or user_states[user_id]["current_task"] is None:
+            await message.answer("Немає активного завдання. Натисни 'Нове завдання'.")
+            return
+        level = user_states[user_id]["current_level"]
+        points = points_map[level]
+        user_states[user_id]["score"] += points
+        user_states[user_id]["skips"] = 0
+        # Заносимо завдання в список виконаних (вже зроблено в get_new_task_for_user)
+        await message.answer(f"Завдання виконано! +{points} балів.\
