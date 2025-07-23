@@ -1,2 +1,4 @@
 aiogram==2.25.1
 aiohttp==3.8.1
+pip install --upgrade pip
+pip install -r requirements.txt
