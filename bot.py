@@ -3,7 +3,7 @@ import random
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from tasks import tasks  # ваш файл з завданнями
+from tasks import tasks  # файл з завданнями
 
 API_TOKEN = '7470253170:AAHX7NqY3L3H4pdCXVeDPsMXPvz8DM0_L70'
 
@@ -12,8 +12,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-user_states = {}
-
+# Бали за рівень
 points_map = {
     "easy": 1,
     "medium": 2,
@@ -21,28 +20,42 @@ points_map = {
     "bonus": 5
 }
 
-def get_deadline_by_level(level: str) -> datetime:
-    now = datetime.now()
-    if level == "hard":
-        return now + timedelta(days=7)  # 7 днів на виконання
-    else:
-        return now + timedelta(hours=24)  # 24 години для інших
+# Сесії гри: key - chat_id або інша логіка, value - dict з двома гравцями (user_ids)
+game_sessions = {}
+
+# Стани користувачів
+user_states = {}
+# Структура user_states[user_id] = {
+#   'score': int,
+#   'used': set(),
+#   'skips': int,
+#   'current_task': str or None,
+#   'current_level': str or None,
+#   'deadline': datetime or None,
+#   'partner_id': int or None
+# }
 
 def get_new_task(user_id):
     used = user_states[user_id]["used"]
-    # Вибираємо рівень складності випадково
     level = random.choice(list(tasks.keys()))
-    available = [t for t in tasks[level] if t not in used and t not in user_states[user_id]["completed_by_any"]]
+    available = [t for t in tasks[level] if t not in used]
     if not available:
         for lvl in tasks.keys():
-            available = [t for t in tasks[lvl] if t not in used and t not in user_states[user_id]["completed_by_any"]]
+            available = [t for t in tasks[lvl] if t not in used]
             if available:
                 level = lvl
                 break
     if not available:
         return None, None
     task = random.choice(available)
+    user_states[user_id]["used"].add(task)
     return task, level
+
+def get_deadline_by_level(level):
+    if level == "hard":
+        return datetime.now() + timedelta(days=7)
+    else:
+        return datetime.now() + timedelta(days=1)
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -51,125 +64,187 @@ async def cmd_start(message: types.Message):
         "score": 0,
         "used": set(),
         "skips": 0,
-        "proposed_task": None,
-        "proposed_level": None,
-        "proposed_deadline": None,
-        "completed_by_any": set()
+        "current_task": None,
+        "current_level": None,
+        "deadline": None,
+        "partner_id": None,
     }
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("Нове завдання"))
-    kb.add(KeyboardButton("Пропустити"))
-    kb.add(KeyboardButton("Мій рахунок"))
-    kb.add(KeyboardButton("Список виконаних"))
-    kb.add(KeyboardButton("Закінчити гру"))
+    kb.add(KeyboardButton("Почати гру з партнером"))
+    kb.add(KeyboardButton("Переглянути моє завдання"))
+    kb.add(KeyboardButton("Переглянути завдання партнера"))
     kb.add(KeyboardButton("Прийняти завдання"))
     kb.add(KeyboardButton("Завдання виконано"))
-    await message.answer("Вітаю в Sex Bingo! Натисни 'Нове завдання', щоб отримати завдання.", reply_markup=kb)
+    kb.add(KeyboardButton("Пропустити"))
+    kb.add(KeyboardButton("Мій рахунок"))
+    kb.add(KeyboardButton("Рахунок партнера"))
+    kb.add(KeyboardButton("Закінчити гру"))
+    await message.answer(
+        "Вітаю! Щоб грати з партнером, натисни 'Почати гру з партнером'. "
+        "Інші кнопки для управління грою.",
+        reply_markup=kb
+    )
 
-@dp.message_handler()
-async def handle_message(message: types.Message):
+@dp.message_handler(lambda message: message.text == "Почати гру з партнером")
+async def start_game_with_partner(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in user_states:
-        await message.answer("Спочатку введи /start")
+    await message.answer("Введи Telegram user ID або username партнера (без @):")
+
+    # Чекаємо наступне повідомлення для отримання партнера
+    @dp.message_handler()
+    async def set_partner(msg: types.Message):
+        partner_id = None
+        # Спробуємо витягти айді, якщо це число
+        if msg.text.isdigit():
+            partner_id = int(msg.text)
+        else:
+            # Спробуємо знайти користувача по username, це складніше і вимагає додаткової логіки
+            await msg.answer("Поки введіть user_id цифрами.")
+            return
+
+        if partner_id == user_id:
+            await msg.answer("Ти не можеш грати з самим собою, введи інший user ID.")
+            return
+
+        # Ініціалізуємо стан для партнера, якщо немає
+        if partner_id not in user_states:
+            user_states[partner_id] = {
+                "score": 0,
+                "used": set(),
+                "skips": 0,
+                "current_task": None,
+                "current_level": None,
+                "deadline": None,
+                "partner_id": user_id
+            }
+        else:
+            user_states[partner_id]["partner_id"] = user_id
+
+        user_states[user_id]["partner_id"] = partner_id
+
+        # Створюємо сесію, key - tuple двох user_id (для простоти унікальний ідентифікатор сесії)
+        session_key = tuple(sorted([user_id, partner_id]))
+        game_sessions[session_key] = {"players": session_key}
+
+        await msg.answer(f"Гра почалася з користувачем {partner_id}. Тепер натисни 'Нове завдання' для отримання завдання.")
+
+        # Видаляємо цей handler після першого використання, щоб не перехоплював всі наступні повідомлення
+        dp.message_handlers.unregister(set_partner)
+
+@dp.message_handler(lambda message: message.text == "Нове завдання")
+async def new_task_handler(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_states or user_states[user_id]["partner_id"] is None:
+        await message.answer("Спочатку почніть гру з партнером командою 'Почати гру з партнером'.")
         return
 
-    text = message.text.lower()
+    task, level = get_new_task(user_id)
+    if task is None:
+        await message.answer("Всі завдання виконані! Вітаємо 🎉")
+        return
+    deadline = get_deadline_by_level(level)
+    user_states[user_id]["current_task"] = task
+    user_states[user_id]["current_level"] = level
+    user_states[user_id]["deadline"] = deadline
+    user_states[user_id]["skips"] = 0
 
-    state = user_states[user_id]
+    await message.answer(
+        f"Твоє завдання ({level} рівень, {points_map[level]} балів):\n\n{task}\n\n"
+        f"Термін виконання: до {deadline.strftime('%d-%m-%Y %H:%M')}\n"
+        "Щоб прийняти завдання, натисни кнопку 'Прийняти завдання'."
+    )
 
-    if text == "нове завдання":
-        task, level = get_new_task(user_id)
-        if task is None:
-            await message.answer("Всі завдання виконані! Вітаємо 🎉")
-            return
-        deadline = get_deadline_by_level(level)
-        state["proposed_task"] = task
-        state["proposed_level"] = level
-        state["proposed_deadline"] = deadline
-        deadline_str = deadline.strftime("%d-%m-%Y %H:%M")
-        await message.answer(
-            f"Нове завдання ({level} рівень, {points_map[level]} балів):\n\n{task}\n\n"
-            f"Термін виконання: до {deadline_str}\n\n"
-            "Якщо готовий виконати, натисни 'Прийняти завдання'. Якщо ні — 'Пропустити'."
-        )
+@dp.message_handler(lambda message: message.text == "Прийняти завдання")
+async def accept_task_handler(message: types.Message):
+    user_id = message.from_user.id
+    if not user_states[user_id].get("current_task"):
+        await message.answer("У тебе немає активного завдання для прийняття. Натисни 'Нове завдання'.")
+        return
+    await message.answer(f"Завдання прийнято:\n{user_states[user_id]['current_task']}")
 
-    elif text == "прийняти завдання":
-        if state["proposed_task"] is None:
-            await message.answer("Спочатку отримай завдання через кнопку 'Нове завдання'.")
-            return
-        # Прийняли завдання — додаємо у used, ставимо поточне активне завдання
-        task = state["proposed_task"]
-        level = state["proposed_level"]
-        state["used"].add(task)
-        state["current_task"] = task
-        state["current_level"] = level
-        state["current_deadline"] = state["proposed_deadline"]
-        state["proposed_task"] = None
-        state["proposed_level"] = None
-        state["proposed_deadline"] = None
-        state["skips"] = 0
-        await message.answer(f"Завдання прийнято! Виконай його до {state['current_deadline'].strftime('%d-%m-%Y %H:%M')}. Коли виконаєш — натисни 'Завдання виконано'.")
+@dp.message_handler(lambda message: message.text == "Завдання виконано")
+async def task_done_handler(message: types.Message):
+    user_id = message.from_user.id
+    if not user_states[user_id].get("current_task"):
+        await message.answer("У тебе немає активного завдання.")
+        return
 
-    elif text == "завдання виконано":
-        if "current_task" not in state or state["current_task"] is None:
-            await message.answer("У тебе немає активного завдання. Спочатку прийми завдання.")
-            return
-        # Перевірка чи не прострочено
-        now = datetime.now()
-        deadline = state.get("current_deadline")
-        if deadline and now > deadline:
-            await message.answer("На жаль, ти не встиг виконати завдання вчасно. Балів не нараховано.")
-            # Очищаємо активне завдання, не даємо бали
-            state["current_task"] = None
-            state["current_level"] = None
-            state["current_deadline"] = None
-            return
-        # Нараховуємо бали
-        level = state["current_level"]
-        points = points_map.get(level, 1)
-        state["score"] += points
-        # Додаємо до списку завдань, що виконані будь-ким (щоб не повторювали)
-        state["completed_by_any"].add(state["current_task"])
-        # Очищаємо активне завдання
-        state["current_task"] = None
-        state["current_level"] = None
-        state["current_deadline"] = None
-        await message.answer(f"Завдання виконано! +{points} балів.\nПоточний рахунок: {state['score']} балів.")
+    level = user_states[user_id]["current_level"]
+    points = points_map[level]
+    user_states[user_id]["score"] += points
+    user_states[user_id]["current_task"] = None
+    user_states[user_id]["current_level"] = None
+    user_states[user_id]["deadline"] = None
+    user_states[user_id]["skips"] = 0
 
-    elif text == "пропустити":
-        state["skips"] += 1
-        if state["skips"] > 2:
-            state["score"] -= 1
-            state["skips"] = 0
-            # Якщо було активне завдання, видаляємо його
-            if "current_task" in state:
-                state["current_task"] = None
-                state["current_level"] = None
-                state["current_deadline"] = None
-            await message.answer("Третій пропуск підряд — мінус 1 бал.")
-        else:
-            await message.answer(f"Пропущено завдання без штрафу ({state['skips']} пропуски).")
-        # При пропуску пропонуємо отримати нове завдання
-        state["proposed_task"] = None
-        state["proposed_level"] = None
-        state["proposed_deadline"] = None
+    await message.answer(f"Завдання виконано! Ти отримав {points} балів.\nТвій рахунок: {user_states[user_id]['score']}")
 
-    elif text == "мій рахунок":
-        await message.answer(f"Твій поточний рахунок: {state['score']} балів")
+@dp.message_handler(lambda message: message.text == "Пропустити")
+async def skip_task_handler(message: types.Message):
+    user_id = message.from_user.id
+    user_states[user_id]["skips"] += 1
+    if user_states[user_id]["skips"] > 2:
+        user_states[user_id]["score"] -= 1
+        user_states[user_id]["skips"] = 0
+        await message.answer("Третій пропуск підряд — мінус 1 бал.")
+    else:
+        await message.answer(f"Пропущено завдання без штрафу ({user_states[user_id]['skips']} пропуски).")
+    # Знімаємо активне завдання, бо воно пропущене
+    user_states[user_id]["current_task"] = None
+    user_states[user_id]["current_level"] = None
+    user_states[user_id]["deadline"] = None
 
-    elif text == "список виконаних":
-        done = state["completed_by_any"]
-        if not done:
-            await message.answer("Поки що не виконано жодного завдання.")
-        else:
-            await message.answer("Виконані завдання:\n" + "\n".join(done))
+@dp.message_handler(lambda message: message.text == "Переглянути моє завдання")
+async def view_my_task(message: types.Message):
+    user_id = message.from_user.id
+    task = user_states[user_id].get("current_task")
+    deadline = user_states[user_id].get("deadline")
+    if task:
+        await message.answer(f"Твоє активне завдання:\n{task}\nТермін виконання до {deadline.strftime('%d-%m-%Y %H:%M')}")
+    else:
+        await message.answer("У тебе немає активного завдання.")
 
-    elif text == "закінчити гру":
-        await message.answer(f"Гру завершено. Твій підсумковий рахунок: {state['score']} балів.\nЩоб почати знову — введи /start")
+@dp.message_handler(lambda message: message.text == "Переглянути завдання партнера")
+async def view_partner_task(message: types.Message):
+    user_id = message.from_user.id
+    partner_id = user_states[user_id].get("partner_id")
+    if not partner_id or partner_id not in user_states:
+        await message.answer("Партнер не підключений або не знайдений.")
+        return
+    task = user_states[partner_id].get("current_task")
+    if task:
+        await message.answer("Партнер має активне завдання.")
+    else:
+        await message.answer("Партнер не має активного завдання.")
+
+@dp.message_handler(lambda message: message.text == "Мій рахунок")
+async def my_score(message: types.Message):
+    user_id = message.from_user.id
+    score = user_states[user_id]["score"]
+    await message.answer(f"Твій рахунок: {score} балів")
+
+@dp.message_handler(lambda message: message.text == "Рахунок партнера")
+async def partner_score(message: types.Message):
+    user_id = message.from_user.id
+    partner_id = user_states[user_id].get("partner_id")
+    if not partner_id or partner_id not in user_states:
+        await message.answer("Партнер не підключений або не знайдений.")
+        return
+    score = user_states[partner_id]["score"]
+    await message.answer(f"Рахунок партнера: {score} балів")
+
+@dp.message_handler(lambda message: message.text == "Закінчити гру")
+async def end_game(message: types.Message):
+    user_id = message.from_user.id
+    partner_id = user_states[user_id].get("partner_id")
+
+    if partner_id and partner_id in user_states:
+        user_states[partner_id]["partner_id"] = None
+
+    if user_id in user_states:
         del user_states[user_id]
 
-    else:
-        await message.answer("Натисни кнопку на клавіатурі або введи /start для початку.")
+    await message.answer("Гру завершено. Щоб почати знову — введи /start.")
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
