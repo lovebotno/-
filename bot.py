@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, executor, types
 
-from tasks import tasks  # твій словник tasks = { "easy": [...], "medium": [...], ... }
+from tasks import tasks  # Твоя структура завдань з рівнями
 
 API_TOKEN = '7470253170:AAHX7NqY3L3H4pdCXVeDPsMXPvz8DM0_L70'  # 🔁 Замінити на свій токен
 
@@ -17,16 +17,16 @@ users = {}
 active_games = {}
 assigned_tasks = set()
 
-def get_all_available_tasks(assigned_tasks):
-    available = []
-    for level, tasks_list in tasks.items():
-        for task_text in tasks_list:
-            if task_text not in assigned_tasks:
-                available.append((task_text, level))
-    return available
-
 def get_remaining_tasks():
-    return len(get_all_available_tasks(assigned_tasks))
+    # Порахувати завдання, які не призначені ні одному з гравців (по обох)
+    all_assigned = set()
+    for user in users.values():
+        for t in user['accepted_tasks']:
+            all_assigned.add(t['text'])
+        if user['current_task']:
+            all_assigned.add(user['current_task']['text'])
+    total_tasks = sum(len(v) for v in tasks.values())
+    return total_tasks - len(all_assigned)
 
 @dp.message_handler(commands=['start', 'register'])
 async def register(message: types.Message):
@@ -49,6 +49,11 @@ async def register(message: types.Message):
         )
     else:
         await message.answer("Ти вже зареєстрований у грі.")
+
+@dp.message_handler(commands=['myid'])
+async def show_my_id(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(f"Твій Telegram ID: `{user_id}`", parse_mode="Markdown")
 
 @dp.message_handler(commands=['invite'])
 async def invite_partner(message: types.Message):
@@ -89,35 +94,45 @@ async def send_task(message: types.Message):
         await message.answer("У тебе вже є активне завдання.")
         return
 
-    available_tasks = get_all_available_tasks(assigned_tasks)
+    # Збираємо всі призначені завдання (поточні + прийняті)
+    all_assigned = set()
+    for u in users.values():
+        if u['current_task']:
+            all_assigned.add(u['current_task']['text'])
+        for t in u['accepted_tasks']:
+            all_assigned.add(t['text'])
+
+    # Збираємо всі завдання у список із словника
+    all_tasks_list = []
+    for level, arr in tasks.items():
+        for text in arr:
+            all_tasks_list.append({'text': text, 'level': level})
+
+    available_tasks = [t for t in all_tasks_list if t['text'] not in all_assigned]
+
     if not available_tasks:
         await message.answer("Усі завдання виконано 🎉")
         return
 
-    task_text, level = random.choice(available_tasks)
-    assigned_tasks.add(task_text)
+    task = random.choice(available_tasks)
 
-    # Визначення терміну виконання залежно від рівня завдання
-    if level == "easy":
-        duration = timedelta(days=1)
-    elif level == "medium":
-        duration = timedelta(days=3)
-    else:  # hard та bonus
-        duration = timedelta(days=7)
+    duration_days = 1 if task['level'] == 'easy' else 3 if task['level'] == 'medium' else 7
 
-    deadline = datetime.now() + duration
+    deadline = datetime.now() + timedelta(days=duration_days)
 
-    user['current_task'] = {'text': task_text, 'level': level, 'deadline': deadline}
+    user['current_task'] = {'text': task['text'], 'deadline': deadline, 'level': task['level']}
+
+    partner_id = user['partner']
+    partner = users[partner_id]
 
     await message.answer(
-        f"📝 Завдання ({level} рівень):\n{task_text}\n"
-        f"⏰ Термін виконання: {duration.days} днів\n\n"
+        f"📝 Завдання ({task['level']} рівень):\n{task['text']}\n"
+        f"⏰ Термін виконання: {duration_days} днів\n\n"
         "✅ /accept — прийняти\n❌ /skip — відмовитись"
     )
 
-    partner_id = user['partner']
     try:
-        await bot.send_message(partner_id, f"{user['name']} отримав нове завдання: {task_text}")
+        await bot.send_message(partner_id, f"{user['name']} отримав нове завдання: {task['text']}")
     except Exception:
         pass
 
@@ -131,22 +146,13 @@ async def accept_task(message: types.Message):
 
     task_text = user['current_task']['text']
     level = user['current_task']['level']
-
-    # Нарахування балів залежно від рівня
-    points_map = {
-        "easy": 1,
-        "medium": 2,
-        "hard": 3,
-        "bonus": 5
-    }
-    points = points_map.get(level, 1)
-
+    points_map = {'easy': 1, 'medium': 2, 'hard': 3, 'bonus': 5}
     user['accepted_tasks'].append(user['current_task'])
     user['current_task'] = None
     user['skips'] = 0
-    user['score'] += points
+    user['score'] += points_map.get(level, 1)
 
-    await message.answer(f"✅ Завдання прийнято: {task_text}\nОтримано {points} балів!")
+    await message.answer(f"✅ Завдання прийнято: {task_text}\n+{points_map.get(level,1)} балів")
 
     partner_id = user['partner']
     if partner_id:
@@ -161,16 +167,15 @@ async def skip_task(message: types.Message):
         return
 
     user['skips'] += 1
-    task_text = user['current_task']['text']
+    text = user['current_task']['text']
     user['current_task'] = None
-    assigned_tasks.discard(task_text)
 
     if user['skips'] >= 3:
         user['score'] -= 1
         user['skips'] = 0
         await message.answer("❌ 3 пропуски підряд. -1 бал.")
     else:
-        await message.answer(f"Пропущено завдання: {task_text}")
+        await message.answer(f"Пропущено завдання: {text}")
 
 @dp.message_handler(commands=['score'])
 async def show_score(message: types.Message):
@@ -200,8 +205,7 @@ async def task_status(message: types.Message):
     if user['current_task']:
         deadline = user['current_task']['deadline']
         time_left = deadline - datetime.now()
-        days_left = time_left.days if time_left.days >= 0 else 0
-        msg += f"\n🕓 Твоє завдання: {user['current_task']['text']}\nЗалишилось: {days_left} днів"
+        msg += f"\n🕓 Твоє завдання: {user['current_task']['text']}\nЗалишилось: {time_left.days} днів"
     else:
         msg += "\nУ тебе немає активного завдання."
 
@@ -209,3 +213,4 @@ async def task_status(message: types.Message):
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
+
