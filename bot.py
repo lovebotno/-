@@ -17,8 +17,41 @@ users = {}
 active_games = {}
 assigned_tasks = set()
 
+# Таймери для нагадувань (user_id: deadline)
+reminder_tasks = {}
+
 def get_remaining_tasks():
     return len([t for t in TASKS if t['text'] not in assigned_tasks])
+
+def get_task_duration(level: str) -> timedelta:
+    if level == 'easy':
+        return timedelta(days=1)
+    elif level == 'medium':
+        return timedelta(days=3)
+    elif level in ('hard', 'bonus'):
+        return timedelta(days=7)
+    else:
+        return timedelta(days=1)  # дефолт
+
+async def send_deadline_reminder(user_id):
+    user = users.get(user_id)
+    if user and user.get('current_task'):
+        task = user['current_task']
+        deadline = task['deadline']
+        now = datetime.now()
+        if deadline > now:
+            time_left = deadline - now
+            await bot.send_message(user_id,
+                f"⏰ Нагадування: Завдання \"{task['text']}\" потрібно виконати до {deadline.strftime('%Y-%m-%d %H:%M:%S')}.\n"
+                f"Залишилось часу: {time_left}.")
+        else:
+            # Прострочене завдання — знімаємо 1 бал і скидаємо завдання
+            user['score'] = max(user['score'] - 1, 0)
+            user['current_task'] = None
+            assigned_tasks.discard(task['text'])
+            await bot.send_message(user_id,
+                f"⚠️ Термін виконання завдання \"{task['text']}\" минув. Тобі знято 1 бал.\n"
+                f"Зараз у тебе немає активного завдання. Попроси нове командою /task.")
 
 @dp.message_handler(commands=['start', 'register'])
 async def register(message: types.Message):
@@ -89,14 +122,11 @@ async def send_task(message: types.Message):
     task = random.choice(available_tasks)
     assigned_tasks.add(task['text'])
 
-    duration = timedelta(days=1) if task['level'] != 'hard' else timedelta(days=7)
+    duration = get_task_duration(task['level'])
     deadline = datetime.now() + duration
 
-    user['current_task'] = {'text': task['text'], 'deadline': deadline}
-
-    partner_id = user['partner']
-    partner = users[partner_id]
-    partner_name = partner['name']
+    user['current_task'] = {'text': task['text'], 'deadline': deadline, 'level': task['level']}
+    reminder_tasks[user_id] = deadline - timedelta(hours=12)  # Нагадування за 12 годин до дедлайну
 
     await message.answer(
         f"📝 Завдання:\n{task['text']}\n"
@@ -104,6 +134,7 @@ async def send_task(message: types.Message):
         "✅ /accept — прийняти\n❌ /skip — відмовитись"
     )
 
+    partner_id = user['partner']
     try:
         await bot.send_message(partner_id, f"{user['name']} отримав нове завдання: {task['text']}")
     except Exception:
@@ -121,7 +152,9 @@ async def accept_task(message: types.Message):
     user['accepted_tasks'].append(user['current_task'])
     user['current_task'] = None
     user['skips'] = 0
-    user['score'] += 1
+    user['score'] += 1  # або інша логіка нарахування балів
+
+    reminder_tasks.pop(user_id, None)
 
     await message.answer(f"✅ Завдання прийнято: {task_text}")
 
@@ -142,12 +175,30 @@ async def skip_task(message: types.Message):
     user['current_task'] = None
     assigned_tasks.discard(text)
 
+    reminder_tasks.pop(user_id, None)
+
     if user['skips'] >= 3:
         user['score'] -= 1
         user['skips'] = 0
         await message.answer("❌ 3 пропуски підряд. -1 бал.")
     else:
         await message.answer(f"Пропущено завдання: {text}")
+
+@dp.message_handler(commands=['extend'])
+async def extend_task(message: types.Message):
+    user_id = message.from_user.id
+    user = users.get(user_id)
+    if not user or not user.get('current_task'):
+        await message.answer("У тебе немає активного завдання для продовження.")
+        return
+
+    # Додаємо 1 день до дедлайну
+    user['current_task']['deadline'] += timedelta(days=1)
+
+    # Оновлюємо нагадування
+    reminder_tasks[user_id] = user['current_task']['deadline'] - timedelta(hours=12)
+
+    await message.answer(f"⏳ Термін виконання завдання продовжено на 1 день.\nНовий дедлайн: {user['current_task']['deadline'].strftime('%Y-%m-%d %H:%M:%S')}")
 
 @dp.message_handler(commands=['score'])
 async def show_score(message: types.Message):
@@ -177,11 +228,29 @@ async def task_status(message: types.Message):
     if user['current_task']:
         deadline = user['current_task']['deadline']
         time_left = deadline - datetime.now()
-        msg += f"\n🕓 Твоє завдання: {user['current_task']['text']}\nЗалишилось: {time_left.days} днів"
+        days_left = time_left.days
+        hours_left = time_left.seconds // 3600
+        msg += (f"\n🕓 Твоє завдання: {user['current_task']['text']}\n"
+                f"Залишилось: {days_left} днів і {hours_left} годин")
     else:
         msg += "\nУ тебе немає активного завдання."
 
     await message.answer(msg)
 
+async def check_reminders():
+    while True:
+        now = datetime.now()
+        to_remove = []
+        for user_id, remind_time in reminder_tasks.items():
+            if now >= remind_time:
+                await send_deadline_reminder(user_id)
+                to_remove.append(user_id)
+        for user_id in to_remove:
+            reminder_tasks.pop(user_id, None)
+        await asyncio.sleep(3600)  # Перевіряємо кожну годину
+
 if __name__ == '__main__':
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_reminders())
     executor.start_polling(dp, skip_updates=True)
